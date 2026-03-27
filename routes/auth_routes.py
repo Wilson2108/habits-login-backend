@@ -1,9 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response, Cookie
 from database import users_collection, login_logs_collection
 from models import UserRegister, UserLogin
-from auth import hash_password, verify_password, create_access_token
+from auth import hash_password, verify_password, create_access_token, create_refresh_token, decode_refresh_token, REFRESH_TOKEN_EXPIRE_DAYS
 from datetime import datetime
-from fastapi import Request
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -40,7 +39,7 @@ def register(user: UserRegister):
 
 #     return {"access_token": token, "token_type": "bearer"}
 @router.post("/login")
-def login(user: UserLogin, request: Request):
+def login(user: UserLogin, request: Request, response: Response):
 
     client_ip = request.client.host
 
@@ -69,7 +68,18 @@ def login(user: UserLogin, request: Request):
 
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    token = create_access_token({"sub": user.email})
+    access_token = create_access_token({"sub": user.email})
+    refresh_token = create_refresh_token({"sub": user.email})
+
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+    )
 
     login_logs_collection.insert_one({
         "email": user.email,
@@ -78,4 +88,36 @@ def login(user: UserLogin, request: Request):
         "ip": client_ip
     })
 
-    return {"access_token": token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/refresh")
+def refresh(refresh_token: str = Cookie(None)):
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Missing refresh token")
+
+    try:
+        payload = decode_refresh_token(refresh_token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    email = payload.get("sub")
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    access_token = create_access_token({"sub": email})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/logout")
+def logout(response: Response):
+    response.set_cookie(
+        key="refresh_token",
+        value="",
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/auth/refresh",
+        max_age=0,
+    )
+    return {"message": "Logged out"}
